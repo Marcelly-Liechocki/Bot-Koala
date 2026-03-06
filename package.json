@@ -1,0 +1,14 @@
+{
+  "name": "bot-koala-filmes",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Bot de Discord para avaliação de filmes",
+  "type": "module",
+  "scripts": {
+    "start": "node src/bot.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.4.5"
+  }
+}
