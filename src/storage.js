@@ -1,9 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const DEFAULT_DATA = {
+const DEFAULT_GUILD_DATA = () => ({
   users: {},
   movies: {}
+});
+
+const DEFAULT_DATA = {
+  guilds: {}
 };
 
 export class Storage {
@@ -16,10 +20,25 @@ export class Storage {
     try {
       const raw = fs.readFileSync(this.filePath, 'utf8');
       const parsed = JSON.parse(raw);
-      return {
-        users: parsed.users || {},
-        movies: parsed.movies || {}
-      };
+
+      if (parsed.guilds && typeof parsed.guilds === 'object') {
+        return {
+          guilds: parsed.guilds
+        };
+      }
+
+      if (parsed.users || parsed.movies) {
+        return {
+          guilds: {
+            __legacy_global__: {
+              users: parsed.users || {},
+              movies: parsed.movies || {}
+            }
+          }
+        };
+      }
+
+      return structuredClone(DEFAULT_DATA);
     } catch {
       return structuredClone(DEFAULT_DATA);
     }
@@ -31,27 +50,50 @@ export class Storage {
     fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), 'utf8');
   }
 
-  isLinked(discordId) {
-    return Boolean(this.data.users[discordId]);
+  getGuildData(guildId, create = false) {
+    if (!guildId) return null;
+
+    const existing = this.data.guilds[guildId];
+    if (existing) return existing;
+
+    const legacy = this.data.guilds.__legacy_global__;
+    if (legacy && Object.keys(this.data.guilds).length === 1) {
+      this.data.guilds[guildId] = legacy;
+      delete this.data.guilds.__legacy_global__;
+      this.save();
+      return this.data.guilds[guildId];
+    }
+
+    if (!create) return null;
+
+    this.data.guilds[guildId] = DEFAULT_GUILD_DATA();
+    return this.data.guilds[guildId];
   }
 
-  linkUser(discordId) {
-    if (!this.isLinked(discordId)) {
-      this.data.users[discordId] = {
+  isLinked(guildId, discordId) {
+    const guild = this.getGuildData(guildId, false);
+    return Boolean(guild?.users?.[discordId]);
+  }
+
+  linkUser(guildId, discordId) {
+    const guild = this.getGuildData(guildId, true);
+    if (!this.isLinked(guildId, discordId)) {
+      guild.users[discordId] = {
         discordId,
         createdAt: new Date().toISOString(),
         lastRecommendedMovieId: null
       };
       this.save();
     }
-    return this.data.users[discordId];
+    return guild.users[discordId];
   }
 
-  upsertMovie(movie) {
+  upsertMovie(guildId, movie) {
+    const guild = this.getGuildData(guildId, true);
     const id = String(movie.id);
-    const existing = this.data.movies[id] || {};
+    const existing = guild.movies[id] || {};
 
-    this.data.movies[id] = {
+    guild.movies[id] = {
       ...existing,
       id,
       title: movie.title,
@@ -64,15 +106,16 @@ export class Storage {
       reviews: existing.reviews || {}
     };
     this.save();
-    return this.data.movies[id];
+    return guild.movies[id];
   }
 
-  getMovie(id) {
-    return this.data.movies[String(id)] || null;
+  getMovie(guildId, id) {
+    const guild = this.getGuildData(guildId, false);
+    return guild?.movies?.[String(id)] || null;
   }
 
-  setRating(discordId, movieId, stars) {
-    const movie = this.getMovie(movieId);
+  setRating(guildId, discordId, movieId, stars) {
+    const movie = this.getMovie(guildId, movieId);
     if (!movie) return false;
     if (movie.ratings[discordId]) return false;
 
@@ -81,18 +124,18 @@ export class Storage {
     return true;
   }
 
-  hasRating(discordId, movieId) {
-    const movie = this.getMovie(movieId);
+  hasRating(guildId, discordId, movieId) {
+    const movie = this.getMovie(guildId, movieId);
     return Boolean(movie && movie.ratings && movie.ratings[discordId]);
   }
 
-  getUserRating(discordId, movieId) {
-    const movie = this.getMovie(movieId);
+  getUserRating(guildId, discordId, movieId) {
+    const movie = this.getMovie(guildId, movieId);
     return movie?.ratings?.[discordId] || null;
   }
 
-  setReview(discordId, movieId, text) {
-    const movie = this.getMovie(movieId);
+  setReview(guildId, discordId, movieId, text) {
+    const movie = this.getMovie(guildId, movieId);
     if (!movie) return null;
 
     const now = new Date().toISOString();
@@ -109,8 +152,8 @@ export class Storage {
     return movie.reviews[discordId];
   }
 
-  getMovieReviews(movieId) {
-    const movie = this.getMovie(movieId);
+  getMovieReviews(guildId, movieId) {
+    const movie = this.getMovie(guildId, movieId);
     if (!movie?.reviews) return [];
 
     return Object.entries(movie.reviews).map(([userId, review]) => ({
@@ -121,8 +164,8 @@ export class Storage {
     }));
   }
 
-  getReviewsByUser(discordId) {
-    return this.allMovies()
+  getReviewsByUser(guildId, discordId) {
+    return this.allMovies(guildId)
       .map((movie) => {
         const review = movie?.reviews?.[discordId];
         if (!review?.text) return null;
@@ -142,12 +185,13 @@ export class Storage {
       .filter(Boolean);
   }
 
-  allMovies() {
-    return Object.values(this.data.movies);
+  allMovies(guildId) {
+    const guild = this.getGuildData(guildId, false);
+    return Object.values(guild?.movies || {});
   }
 
-  getUserFilms(discordId) {
-    return this.allMovies()
+  getUserFilms(guildId, discordId) {
+    return this.allMovies(guildId)
       .map((movie) => {
         if (!movie.ratings || !movie.ratings[discordId]) return null;
         return {
@@ -165,8 +209,8 @@ export class Storage {
       .filter(Boolean);
   }
 
-  getTopMovies(limit = 10) {
-    return this.allMovies()
+  getTopMovies(guildId, limit = 10) {
+    return this.allMovies(guildId)
       .map((movie) => {
         const ratings = Object.values(movie.ratings || {});
         const count = ratings.length;
@@ -184,10 +228,10 @@ export class Storage {
       .slice(0, limit);
   }
 
-  getTopUsers(limit = 10) {
+  getTopUsers(guildId, limit = 10) {
     const counts = new Map();
 
-    for (const movie of this.allMovies()) {
+    for (const movie of this.allMovies(guildId)) {
       for (const userId of Object.keys(movie.ratings || {})) {
         counts.set(userId, (counts.get(userId) || 0) + 1);
       }
@@ -199,35 +243,40 @@ export class Storage {
       .slice(0, limit);
   }
 
-  getRatedMoviesByUser(discordId) {
-    return this.allMovies().filter((movie) => movie.ratings && movie.ratings[discordId]);
+  getRatedMoviesByUser(guildId, discordId) {
+    return this.allMovies(guildId).filter((movie) => movie.ratings && movie.ratings[discordId]);
   }
 
-  getUnratedMoviesByUser(discordId) {
-    return this.allMovies().filter((movie) => !movie.ratings || !movie.ratings[discordId]);
+  getUnratedMoviesByUser(guildId, discordId) {
+    return this.allMovies(guildId).filter((movie) => !movie.ratings || !movie.ratings[discordId]);
   }
 
   purgeLegacyOmdbData() {
     let removedCount = 0;
     const removedMovieIds = new Set();
 
-    for (const [movieId, movie] of Object.entries(this.data.movies)) {
-      const idAsString = String(movieId);
-      const poster = String(movie?.poster || '');
-      const isImdbId = idAsString.startsWith('tt');
-      const isAmazonPoster = poster.includes('m.media-amazon.com');
-      if (isImdbId || isAmazonPoster) {
-        delete this.data.movies[movieId];
-        removedMovieIds.add(idAsString);
-        removedCount += 1;
+    for (const guild of Object.values(this.data.guilds)) {
+      if (!guild?.movies) continue;
+
+      for (const [movieId, movie] of Object.entries(guild.movies)) {
+        const idAsString = String(movieId);
+        const poster = String(movie?.poster || '');
+        const isImdbId = idAsString.startsWith('tt');
+        const isAmazonPoster = poster.includes('m.media-amazon.com');
+        if (isImdbId || isAmazonPoster) {
+          delete guild.movies[movieId];
+          removedMovieIds.add(idAsString);
+          removedCount += 1;
+        }
       }
     }
 
-    for (const user of Object.values(this.data.users)) {
-      if (!user) continue;
-      const last = user.lastRecommendedMovieId ? String(user.lastRecommendedMovieId) : null;
-      if (last && removedMovieIds.has(last)) {
-        user.lastRecommendedMovieId = null;
+    for (const guild of Object.values(this.data.guilds)) {
+      for (const user of Object.values(guild?.users || {})) {
+        const last = user?.lastRecommendedMovieId ? String(user.lastRecommendedMovieId) : null;
+        if (last && removedMovieIds.has(last)) {
+          user.lastRecommendedMovieId = null;
+        }
       }
     }
 
@@ -235,14 +284,16 @@ export class Storage {
     return removedCount;
   }
 
-  getLastRecommendedMovieId(discordId) {
-    return this.data.users[discordId]?.lastRecommendedMovieId || null;
+  getLastRecommendedMovieId(guildId, discordId) {
+    const guild = this.getGuildData(guildId, false);
+    return guild?.users?.[discordId]?.lastRecommendedMovieId || null;
   }
 
-  setLastRecommendedMovieId(discordId, movieId) {
-    if (!this.data.users[discordId]) this.linkUser(discordId);
-    this.data.users[discordId].lastRecommendedMovieId = String(movieId);
-    this.data.users[discordId].lastRecommendedAt = new Date().toISOString();
+  setLastRecommendedMovieId(guildId, discordId, movieId) {
+    const guild = this.getGuildData(guildId, true);
+    if (!guild.users[discordId]) this.linkUser(guildId, discordId);
+    guild.users[discordId].lastRecommendedMovieId = String(movieId);
+    guild.users[discordId].lastRecommendedAt = new Date().toISOString();
     this.save();
   }
 }

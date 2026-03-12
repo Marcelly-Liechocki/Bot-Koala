@@ -57,12 +57,12 @@ const linkButton = (discordUserId) =>
       .setStyle(ButtonStyle.Success)
   );
 
-const isLinked = (id) => storage.isLinked(id);
+const isLinked = (guildId, id) => storage.isLinked(guildId, id);
 
 const starsText = (value) => `${'⭐'.repeat(value)} (${value})`;
 
-const ratingStats = (movieId) => {
-  const movie = storage.getMovie(movieId);
+const ratingStats = (guildId, movieId) => {
+  const movie = storage.getMovie(guildId, movieId);
   const scores = movie ? Object.values(movie.ratings || {}) : [];
   if (!scores.length) return { average: null, count: 0 };
 
@@ -73,14 +73,14 @@ const ratingStats = (movieId) => {
   return { average, count };
 };
 
-const averageLabel = (movieId) => {
-  const { average, count } = ratingStats(movieId);
+const averageLabel = (guildId, movieId) => {
+  const { average, count } = ratingStats(guildId, movieId);
   if (count === 0) return 'Filme ainda não possui avaliações';
   return `${'⭐'.repeat(Math.round(average))} (${average}) · ${count} avaliação(ões)`;
 };
 
-const buildMovieEmbed = (movie, showRatings = false) => {
-  const { average, count } = ratingStats(movie.id);
+const buildMovieEmbed = (guildId, movie, showRatings = false) => {
+  const { average, count } = ratingStats(guildId, movie.id);
   const embed = new EmbedBuilder()
     .setColor(0x4f46e5)
     .setTitle(`🎬 ${movie.title}`)
@@ -137,20 +137,20 @@ const resolveMovieInput = (rawValue) => {
   return { title: rawValue };
 };
 
-const ensureMovieLoaded = async (input) => {
+const ensureMovieLoaded = async (guildId, input) => {
   const target = resolveMovieInput(input);
   const movie = target.movieId
     ? await searchMovieById(target.movieId, TMDB_API_KEY)
     : await searchMovieByName(target.title, TMDB_API_KEY);
 
   if (!movie) return null;
-  return storage.upsertMovie(movie);
+  return storage.upsertMovie(guildId, movie);
 };
 
-const getLocalMovieSuggestions = (query) => {
+const getLocalMovieSuggestions = (guildId, query) => {
   const normalized = query.toLowerCase();
   return storage
-    .allMovies()
+    .allMovies(guildId)
     .filter((movie) => (movie.title || '').toLowerCase().includes(normalized))
     .slice(0, 25)
     .map((movie) => ({
@@ -259,8 +259,8 @@ client.once(Events.ClientReady, () => {
   console.log(`Bot online como ${client.user?.tag}`);
 });
 
-const withLinkGate = async (interaction) => {
-  if (isLinked(interaction.user.id)) return true;
+const withLinkGate = async (guildId, interaction) => {
+  if (isLinked(guildId, interaction.user.id)) return true;
 
   await interaction.reply({
     embeds: [buildLinkEmbed()],
@@ -273,6 +273,12 @@ const withLinkGate = async (interaction) => {
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
     if (interaction.isAutocomplete()) {
+      const guildId = interaction.guildId;
+      if (!guildId) {
+        await interaction.respond([]);
+        return;
+      }
+
       const commandsWithAutocomplete = new Set(['info', 'avaliacoes', 'avaliar', 'resenha', 'resenhas']);
       if (!commandsWithAutocomplete.has(interaction.commandName)) {
         await interaction.respond([]);
@@ -290,7 +296,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      const localSuggestions = getLocalMovieSuggestions(focusedValue);
+      const localSuggestions = getLocalMovieSuggestions(guildId, focusedValue);
       const remoteSuggestions = await Promise.race([
         searchMovieSuggestions(focusedValue, TMDB_API_KEY).catch(() => []),
         new Promise((resolve) => setTimeout(() => resolve([]), 1200))
@@ -313,11 +319,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.isChatInputCommand()) {
       const { commandName, user } = interaction;
+      const guildId = interaction.guildId;
+      if (!guildId) {
+        await interaction.reply({
+          content: 'Este bot funciona apenas dentro de servidores.',
+          ephemeral: true
+        });
+        return;
+      }
 
       if (commandName === 'meus-filmes') {
-        if (!await withLinkGate(interaction)) return;
+        if (!await withLinkGate(guildId, interaction)) return;
 
-        const list = storage.getUserFilms(user.id);
+        const list = storage.getUserFilms(guildId, user.id);
 
         if (!list.length) {
           await interaction.reply({
@@ -343,9 +357,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (commandName === 'top') {
-        if (!await withLinkGate(interaction)) return;
+        if (!await withLinkGate(guildId, interaction)) return;
 
-        const ranked = storage.getTopMovies(10);
+        const ranked = storage.getTopMovies(guildId, 10);
 
         if (!ranked.length) {
           await interaction.reply({ content: 'Ainda não há avaliações suficientes.', ephemeral: true });
@@ -370,9 +384,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (commandName === 'top-usuarios') {
-        if (!await withLinkGate(interaction)) return;
+        if (!await withLinkGate(guildId, interaction)) return;
 
-        const ranked = storage.getTopUsers(10);
+        const ranked = storage.getTopUsers(guildId, 10);
 
         if (!ranked.length) {
           await interaction.reply({ content: 'Ainda não há avaliações suficientes.', ephemeral: true });
@@ -395,9 +409,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (commandName === 'lista') {
-        if (!await withLinkGate(interaction)) return;
+        if (!await withLinkGate(guildId, interaction)) return;
 
-        const ranked = storage.getTopMovies(storage.allMovies().length);
+        const ranked = storage.getTopMovies(guildId, storage.allMovies(guildId).length);
 
         if (!ranked.length) {
           await interaction.reply({ content: 'Ainda não há avaliações cadastradas.', ephemeral: true });
@@ -420,11 +434,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (commandName === 'recomendar') {
-        if (!await withLinkGate(interaction)) return;
+        if (!await withLinkGate(guildId, interaction)) return;
 
-        const ratedIds = new Set(storage.getRatedMoviesByUser(user.id).map((movie) => String(movie.id)));
-        const unratedKnownIds = new Set(storage.getUnratedMoviesByUser(user.id).map((movie) => String(movie.id)));
-        const lastRecommendedId = storage.getLastRecommendedMovieId(user.id);
+        const ratedIds = new Set(storage.getRatedMoviesByUser(guildId, user.id).map((movie) => String(movie.id)));
+        const unratedKnownIds = new Set(storage.getUnratedMoviesByUser(guildId, user.id).map((movie) => String(movie.id)));
+        const lastRecommendedId = storage.getLastRecommendedMovieId(guildId, user.id);
         const excludedIds = [...new Set([...ratedIds, ...unratedKnownIds])];
         if (lastRecommendedId) excludedIds.push(String(lastRecommendedId));
 
@@ -437,17 +451,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        const movie = storage.upsertMovie(discovered);
-        storage.setLastRecommendedMovieId(user.id, movie.id);
+        const movie = storage.upsertMovie(guildId, discovered);
+        storage.setLastRecommendedMovieId(guildId, user.id, movie.id);
         await interaction.reply({
-          embeds: [buildMovieEmbed(movie, false)]
+          embeds: [buildMovieEmbed(guildId, movie, false)]
         });
         return;
       }
 
       if (commandName === 'resenhas-usuario') {
         const targetUser = interaction.options.getUser('usuario', true);
-        const reviews = storage.getReviewsByUser(targetUser.id);
+        const reviews = storage.getReviewsByUser(guildId, targetUser.id);
 
         if (!reviews.length) {
           await interaction.reply({
@@ -494,7 +508,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       const name = interaction.options.getString('nome', true);
-      const loaded = await ensureMovieLoaded(name);
+      const loaded = await ensureMovieLoaded(guildId, name);
       if (!loaded) {
         await interaction.reply({
           content: 'Não encontrei esse filme. Tente outro nome.',
@@ -503,10 +517,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      if (!await withLinkGate(interaction)) return;
+      if (!await withLinkGate(guildId, interaction)) return;
 
       if (commandName === 'info') {
-        await interaction.reply({ embeds: [buildMovieEmbed(loaded, false)] });
+        await interaction.reply({ embeds: [buildMovieEmbed(guildId, loaded, false)] });
         return;
       }
 
@@ -516,7 +530,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             new EmbedBuilder()
               .setTitle(`📝 Avaliações de ${loaded.title}`)
               .setColor(0x14b8a6)
-              .setDescription(averageLabel(loaded.id))
+              .setDescription(averageLabel(guildId, loaded.id))
               .setThumbnail(loaded.poster || null)
               .addFields(
                 { name: 'Ano', value: loaded.year || 'N/A', inline: true },
@@ -525,7 +539,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           ]
         });
 
-        const movie = storage.getMovie(loaded.id);
+        const movie = storage.getMovie(guildId, loaded.id);
         const ratings = movie?.ratings ? Object.entries(movie.ratings) : [];
         if (!ratings.length) {
           await interaction.followUp({
@@ -558,8 +572,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        const previousReview = storage.getMovieReviews(loaded.id).find((item) => item.userId === user.id);
-        storage.setReview(user.id, loaded.id, reviewText);
+        const previousReview = storage.getMovieReviews(guildId, loaded.id).find((item) => item.userId === user.id);
+        storage.setReview(guildId, user.id, loaded.id, reviewText);
 
         await interaction.reply({
           embeds: [
@@ -575,7 +589,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (commandName === 'resenhas') {
-        const reviews = storage.getMovieReviews(loaded.id);
+        const reviews = storage.getMovieReviews(guildId, loaded.id);
         if (!reviews.length) {
           await interaction.reply({
             embeds: [
@@ -613,7 +627,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       if (commandName === 'avaliar') {
-        if (storage.hasRating(user.id, loaded.id)) {
+        if (storage.hasRating(guildId, user.id, loaded.id)) {
           await interaction.reply({
             content: 'Você já avaliou este filme. Cada usuário pode avaliar somente uma vez.',
             ephemeral: true
@@ -630,6 +644,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.isButton()) {
+      const guildId = interaction.guildId;
+      if (!guildId) {
+        await interaction.reply({
+          content: 'Este botão só funciona dentro de servidores.',
+          ephemeral: true
+        });
+        return;
+      }
+
       const customId = interaction.customId;
       if (customId.startsWith('link|')) {
         const [, targetId] = customId.split('|');
@@ -641,7 +664,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        storage.linkUser(targetId);
+        storage.linkUser(guildId, targetId);
         await interaction.update({
           content: 'Conta vinculada com sucesso! Agora você pode usar todos os comandos.',
           embeds: [],
@@ -660,7 +683,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        if (!isLinked(targetId)) {
+        if (!isLinked(guildId, targetId)) {
           await interaction.reply({
             embeds: [buildLinkEmbed()],
             components: [linkButton(targetId)],
@@ -670,7 +693,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         const stars = Number(starsTextValue);
-        const movie = storage.getMovie(movieId);
+        const movie = storage.getMovie(guildId, movieId);
         if (!movie) {
           await interaction.update({
             content: 'Este filme não está mais disponível para avaliação.',
@@ -679,7 +702,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        const success = storage.setRating(targetId, movieId, stars);
+        const success = storage.setRating(guildId, targetId, movieId, stars);
         if (!success) {
           await interaction.update({
             content: `Você já avaliou **${movie.title}** anteriormente.`,
@@ -688,7 +711,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        const { average, count } = ratingStats(movieId);
+        const { average, count } = ratingStats(guildId, movieId);
         await interaction.update({
           content: `✅ Voto registrado: **${movie.title}** com ${'⭐'.repeat(stars)} (${stars}/5).`,
           embeds: [
