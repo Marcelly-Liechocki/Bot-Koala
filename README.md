@@ -1,12 +1,12 @@
 # Bot Koala Filmes (Discord)
 
-Bot de avaliação de filmes com Discord + API do OMDb.
+Bot de avaliação de filmes com Discord + API do TMDB.
 
 ## Requisitos
 - Node.js 20+
 - Bot no Discord com token
 - ID do Bot (`CLIENT_ID`)
-- API key do OMDb
+- API key do TMDB
 
 ## Estrutura
 - `src/bot.js`: inicialização do bot e handlers de comandos/interações
@@ -31,7 +31,7 @@ npm start
 - `DISCORD_TOKEN`
 - `CLIENT_ID`
 - `GUILD_ID` (opcional, recomenda-se em dev)
-- `OMDB_API_KEY`
+- `TMDB_API_KEY`
 
 ## Comandos
 
@@ -40,6 +40,7 @@ npm start
 - `/avaliar <nome>`: abre botões de 1 a 5 estrelas.
 - `/resenha <nome> <texto>`: adiciona ou atualiza a sua resenha do filme.
 - `/resenhas <nome>`: mostra as resenhas de todos os usuários para o filme.
+- `/resenhas-usuario <usuario>`: mostra todas as resenhas de um usuário.
 - `/meus-filmes`: lista filmes avaliados pelo usuário.
 - `/top`: top 10 filmes.
 - `/top-usuarios`: top 10 usuários.

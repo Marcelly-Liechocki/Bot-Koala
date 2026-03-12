@@ -1,84 +1,71 @@
-const BASE_URL = 'https://www.omdbapi.com/';
+const BASE_URL = 'https://api.themoviedb.org/3';
+const IMAGE_BASE = 'https://image.tmdb.org/t/p/w500';
 
 function normalize(result) {
   return {
-    id: result.imdbID || `${result.Title}-${result.Year}`,
-    title: result.Title || 'Título indisponível',
-    year: result.Year || 'N/A',
-    genres: result.Genre ? result.Genre.split(',').map((genre) => genre.trim()) : [],
-    overview: (result.Plot || 'Sinopse não disponível.').trim(),
-    poster: result.Poster && result.Poster !== 'N/A' ? result.Poster : null
+    id: String(result.id),
+    title: result.title || 'Título indisponível',
+    year: result.release_date ? result.release_date.slice(0, 4) : 'N/A',
+    genres: (result.genres || []).map((genre) => genre.name),
+    overview: (result.overview || 'Sinopse não disponível.').trim(),
+    poster: result.poster_path ? `${IMAGE_BASE}${result.poster_path}` : null
   };
 }
 
 function ensureApiKey(apiKey) {
   if (!apiKey) {
-    throw new Error('OMDB_API_KEY não definida. Crie uma chave no OMDb e adicione em .env.');
+    throw new Error('TMDB_API_KEY não definida. Crie uma chave no TMDB e adicione em .env.');
   }
 }
 
-async function fetchOmdb(params, apiKey, { allowNotFound = false } = {}) {
+async function fetchTmdb(path, apiKey) {
   ensureApiKey(apiKey);
 
-  const url = `${BASE_URL}?apikey=${apiKey}&${params}`;
+  const sep = path.includes('?') ? '&' : '?';
+  const url = `${BASE_URL}${path}${sep}api_key=${apiKey}`;
   const response = await fetch(url);
   const data = await response.json();
 
   if (!response.ok) {
     if (response.status === 401) {
-      throw new Error('OMDb recusou a chave (401). Verifique OMDB_API_KEY e confirme a ativação por email.');
+      throw new Error('TMDB recusou a chave (401). Verifique TMDB_API_KEY no .env.');
     }
-    throw new Error(`Erro ao buscar filme no OMDb: ${response.status}`);
-  }
-
-  if (data.Response === 'False') {
-    const message = data.Error || 'Falha ao consultar OMDb.';
-    if (allowNotFound && message.toLowerCase().includes('not found')) return null;
-    throw new Error(`OMDb: ${message}`);
+    throw new Error(`Erro ao buscar filme no TMDB: ${response.status}`);
   }
 
   return data;
 }
 
 export async function searchMovieByName(name, apiKey) {
-  const query = encodeURIComponent(name);
-  const data = await fetchOmdb(`t=${query}&type=movie&plot=short`, apiKey, { allowNotFound: true });
-  if (!data) return null;
-  return normalize(data);
+  const query = encodeURIComponent(name.trim());
+  const search = await fetchTmdb(`/search/movie?language=pt-BR&query=${query}&include_adult=false&page=1`, apiKey);
+  const first = search?.results?.[0];
+  if (!first) return null;
+
+  const details = await fetchTmdb(`/movie/${first.id}?language=pt-BR`, apiKey);
+  return normalize(details);
 }
 
 export async function searchMovieById(id, apiKey) {
-  const query = encodeURIComponent(id);
-  const data = await fetchOmdb(`i=${query}&type=movie&plot=short`, apiKey, { allowNotFound: true });
-  if (!data) return null;
-  return normalize(data);
+  const details = await fetchTmdb(`/movie/${encodeURIComponent(id)}?language=pt-BR`, apiKey);
+  if (!details?.id) return null;
+  return normalize(details);
 }
 
 export async function searchMovieSuggestions(query, apiKey) {
   const normalizedQuery = query.trim().toLowerCase();
   if (!normalizedQuery) return [];
 
-  const encoded = encodeURIComponent(query);
-  const pages = normalizedQuery.length >= 4 ? [1] : [1, 2];
-  const responses = await Promise.all(
-    pages.map((page) =>
-      fetchOmdb(`s=${encoded}&type=movie&page=${page}`, apiKey, { allowNotFound: true }).catch(() => null)
-    )
-  );
+  const encoded = encodeURIComponent(query.trim());
+  const data = await fetchTmdb(
+    `/search/movie?language=pt-BR&query=${encoded}&include_adult=false&page=1`,
+    apiKey
+  ).catch(() => null);
+  const all = (data?.results || []).filter((item) => item?.id && item?.title);
 
-  const all = responses
-    .flatMap((data) => data?.Search || [])
-    .filter((item) => item?.imdbID && item?.Title);
-
-  const deduped = new Map();
-  for (const item of all) {
-    if (deduped.has(item.imdbID)) continue;
-    deduped.set(item.imdbID, item);
-  }
-
-  const scored = [...deduped.values()]
+  const scored = all
     .map((item) => {
-      const titleLower = item.Title.toLowerCase();
+      const titleLower = item.title.toLowerCase();
       let score = 0;
       if (titleLower === normalizedQuery) score += 100;
       if (titleLower.startsWith(normalizedQuery)) score += 60;
@@ -86,9 +73,9 @@ export async function searchMovieSuggestions(query, apiKey) {
       if (titleLower.startsWith(`${normalizedQuery} `)) score += 10;
       if (titleLower.startsWith(`${normalizedQuery}:`)) score += 10;
       return {
-        id: item.imdbID,
-        title: item.Title,
-        year: item.Year || 'N/A',
+        id: String(item.id),
+        title: item.title,
+        year: item.release_date ? item.release_date.slice(0, 4) : 'N/A',
         score
       };
     })
@@ -99,4 +86,25 @@ export async function searchMovieSuggestions(query, apiKey) {
     .slice(0, 25);
 
   return scored.map(({ id, title, year }) => ({ id, title, year }));
+}
+
+export async function discoverRandomMovie(apiKey, excludedIds = []) {
+  const excluded = new Set((excludedIds || []).map((id) => String(id)));
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const randomPage = Math.floor(Math.random() * 20) + 1;
+    const data = await fetchTmdb(
+      `/discover/movie?language=pt-BR&include_adult=false&sort_by=popularity.desc&vote_count.gte=100&page=${randomPage}`,
+      apiKey
+    ).catch(() => null);
+
+    const pool = (data?.results || []).filter((item) => item?.id && !excluded.has(String(item.id)));
+    if (!pool.length) continue;
+
+    const picked = pool[Math.floor(Math.random() * pool.length)];
+    const details = await fetchTmdb(`/movie/${picked.id}?language=pt-BR`, apiKey).catch(() => null);
+    if (details?.id) return normalize(details);
+  }
+
+  return null;
 }

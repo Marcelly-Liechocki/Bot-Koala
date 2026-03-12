@@ -39,7 +39,8 @@ export class Storage {
     if (!this.isLinked(discordId)) {
       this.data.users[discordId] = {
         discordId,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        lastRecommendedMovieId: null
       };
       this.save();
     }
@@ -120,6 +121,27 @@ export class Storage {
     }));
   }
 
+  getReviewsByUser(discordId) {
+    return this.allMovies()
+      .map((movie) => {
+        const review = movie?.reviews?.[discordId];
+        if (!review?.text) return null;
+
+        return {
+          movie: {
+            id: movie.id,
+            title: movie.title,
+            year: movie.year,
+            poster: movie.poster
+          },
+          text: review.text,
+          createdAt: review.createdAt || null,
+          updatedAt: review.updatedAt || null
+        };
+      })
+      .filter(Boolean);
+  }
+
   allMovies() {
     return Object.values(this.data.movies);
   }
@@ -183,5 +205,44 @@ export class Storage {
 
   getUnratedMoviesByUser(discordId) {
     return this.allMovies().filter((movie) => !movie.ratings || !movie.ratings[discordId]);
+  }
+
+  purgeLegacyOmdbData() {
+    let removedCount = 0;
+    const removedMovieIds = new Set();
+
+    for (const [movieId, movie] of Object.entries(this.data.movies)) {
+      const idAsString = String(movieId);
+      const poster = String(movie?.poster || '');
+      const isImdbId = idAsString.startsWith('tt');
+      const isAmazonPoster = poster.includes('m.media-amazon.com');
+      if (isImdbId || isAmazonPoster) {
+        delete this.data.movies[movieId];
+        removedMovieIds.add(idAsString);
+        removedCount += 1;
+      }
+    }
+
+    for (const user of Object.values(this.data.users)) {
+      if (!user) continue;
+      const last = user.lastRecommendedMovieId ? String(user.lastRecommendedMovieId) : null;
+      if (last && removedMovieIds.has(last)) {
+        user.lastRecommendedMovieId = null;
+      }
+    }
+
+    if (removedCount > 0) this.save();
+    return removedCount;
+  }
+
+  getLastRecommendedMovieId(discordId) {
+    return this.data.users[discordId]?.lastRecommendedMovieId || null;
+  }
+
+  setLastRecommendedMovieId(discordId, movieId) {
+    if (!this.data.users[discordId]) this.linkUser(discordId);
+    this.data.users[discordId].lastRecommendedMovieId = String(movieId);
+    this.data.users[discordId].lastRecommendedAt = new Date().toISOString();
+    this.save();
   }
 }

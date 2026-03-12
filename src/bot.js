@@ -15,15 +15,15 @@ import {
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Storage } from './storage.js';
-import { searchMovieById, searchMovieByName, searchMovieSuggestions } from './movieService.js';
+import { discoverRandomMovie, searchMovieById, searchMovieByName, searchMovieSuggestions } from './movieService.js';
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID || null;
-const OMDB_API_KEY = process.env.OMDB_API_KEY;
+const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
-if (!DISCORD_TOKEN || !CLIENT_ID || !OMDB_API_KEY) {
-  console.error('Defina DISCORD_TOKEN, CLIENT_ID e OMDB_API_KEY no .env antes de iniciar.');
+if (!DISCORD_TOKEN || !CLIENT_ID || !TMDB_API_KEY) {
+  console.error('Defina DISCORD_TOKEN, CLIENT_ID e TMDB_API_KEY no .env antes de iniciar.');
   process.exit(1);
 }
 
@@ -31,6 +31,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const storagePath = path.join(__dirname, '..', 'data', 'filmobot-db.json');
 const storage = new Storage(storagePath);
+const removedOmdbItems = storage.purgeLegacyOmdbData();
+if (removedOmdbItems > 0) {
+  console.log(`Removidos ${removedOmdbItems} filme(s) legados da OMDb do banco local.`);
+}
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -128,16 +132,16 @@ const buildLinkEmbed = () =>
 
 const resolveMovieInput = (rawValue) => {
   if (rawValue.startsWith('id:')) {
-    return { imdbId: rawValue.replace('id:', '') };
+    return { movieId: rawValue.replace('id:', '') };
   }
   return { title: rawValue };
 };
 
 const ensureMovieLoaded = async (input) => {
   const target = resolveMovieInput(input);
-  const movie = target.imdbId
-    ? await searchMovieById(target.imdbId, OMDB_API_KEY)
-    : await searchMovieByName(target.title, OMDB_API_KEY);
+  const movie = target.movieId
+    ? await searchMovieById(target.movieId, TMDB_API_KEY)
+    : await searchMovieByName(target.title, TMDB_API_KEY);
 
   if (!movie) return null;
   return storage.upsertMovie(movie);
@@ -219,6 +223,16 @@ const commands = [
         .setRequired(true)
     ),
 
+  new SlashCommandBuilder()
+    .setName('resenhas-usuario')
+    .setDescription('Mostra todas as resenhas de um usuário')
+    .addUserOption((option) =>
+      option
+        .setName('usuario')
+        .setDescription('Usuário para consultar resenhas')
+        .setRequired(true)
+    ),
+
   new SlashCommandBuilder().setName('meus-filmes').setDescription('Filmes que você já avaliou'),
 
   new SlashCommandBuilder().setName('top').setDescription('Top 10 filmes melhor avaliados'),
@@ -278,7 +292,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const localSuggestions = getLocalMovieSuggestions(focusedValue);
       const remoteSuggestions = await Promise.race([
-        searchMovieSuggestions(focusedValue, OMDB_API_KEY).catch(() => []),
+        searchMovieSuggestions(focusedValue, TMDB_API_KEY).catch(() => []),
         new Promise((resolve) => setTimeout(() => resolve([]), 1200))
       ]);
 
@@ -408,18 +422,73 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (commandName === 'recomendar') {
         if (!await withLinkGate(interaction)) return;
 
-        const candidates = storage.getUnratedMoviesByUser(user.id);
-        if (!candidates.length) {
+        const ratedIds = new Set(storage.getRatedMoviesByUser(user.id).map((movie) => String(movie.id)));
+        const unratedKnownIds = new Set(storage.getUnratedMoviesByUser(user.id).map((movie) => String(movie.id)));
+        const lastRecommendedId = storage.getLastRecommendedMovieId(user.id);
+        const excludedIds = [...new Set([...ratedIds, ...unratedKnownIds])];
+        if (lastRecommendedId) excludedIds.push(String(lastRecommendedId));
+
+        const discovered = await discoverRandomMovie(TMDB_API_KEY, excludedIds);
+        if (!discovered) {
           await interaction.reply({
-            content: 'Não encontrei recomendações (você já avaliou todos os filmes disponíveis no banco do bot).',
+            content: 'Não encontrei recomendações novas no TMDB agora. Tente novamente em instantes.',
             ephemeral: true
           });
           return;
         }
 
-        const movie = candidates[Math.floor(Math.random() * candidates.length)];
+        const movie = storage.upsertMovie(discovered);
+        storage.setLastRecommendedMovieId(user.id, movie.id);
         await interaction.reply({
           embeds: [buildMovieEmbed(movie, false)]
+        });
+        return;
+      }
+
+      if (commandName === 'resenhas-usuario') {
+        const targetUser = interaction.options.getUser('usuario', true);
+        const reviews = storage.getReviewsByUser(targetUser.id);
+
+        if (!reviews.length) {
+          await interaction.reply({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(0x64748b)
+                .setTitle(`🗒️ Resenhas de ${targetUser.username}`)
+                .setDescription('Esse usuário ainda não escreveu resenhas.')
+                .setThumbnail(targetUser.displayAvatarURL())
+            ]
+          });
+          return;
+        }
+
+        const formatted = reviews
+          .sort((a, b) => {
+            const at = a.updatedAt || a.createdAt || '';
+            const bt = b.updatedAt || b.createdAt || '';
+            return bt.localeCompare(at);
+          })
+          .map((item) => `**${item.movie.title}** (${item.movie.year || 'N/A'})\n${item.text}`)
+          .join('\n\n');
+
+        const chunks = formatted.match(/[\s\S]{1,3800}/g) || [formatted];
+        const embeds = chunks.map((chunk, index) =>
+          new EmbedBuilder()
+            .setColor(0x0ea5e9)
+            .setTitle(index === 0 ? `🗒️ Resenhas de ${targetUser.username}` : '🗒️ Resenhas (continuação)')
+            .setDescription(chunk)
+            .setThumbnail(index === 0 ? targetUser.displayAvatarURL() : null)
+        );
+
+        await interaction.reply({ embeds });
+        return;
+      }
+
+      const commandsWithMovieName = new Set(['info', 'avaliacoes', 'avaliar', 'resenha', 'resenhas']);
+      if (!commandsWithMovieName.has(commandName)) {
+        await interaction.reply({
+          content: 'Comando não reconhecido para este fluxo.',
+          ephemeral: true
         });
         return;
       }
